@@ -1,7 +1,7 @@
 
 Atualiza o site de animes da temporada.
 
-Uso: python scripts/update.py
+python scripts/update.py
 
 - Lê data/animes.json (animes acompanhados e textos editoriais).
 - Consulta a API pública do AniList para cada anime (sem chave de API).
