@@ -206,6 +206,7 @@ def pagina_inicial(cards, avisos, agora):
 
 
 def main():
+    print("VERSÃO JIKAN - API:", API)
     animes = ler_json(DATA / "animes.json", [])
     estado = ler_json(DATA / "estado.json", {})
     pendentes = ler_json(DATA / "pendentes.json", [])
