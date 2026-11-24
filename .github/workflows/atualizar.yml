@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""
+
 Atualiza o site de animes da temporada.
 
 Uso: python scripts/update.py
