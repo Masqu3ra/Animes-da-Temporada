@@ -478,6 +478,23 @@ def ordenar_por_nota(lista):
     return sorted(lista, key=lambda c: c.get("mal_nota") or 0, reverse=True)
 
 
+def carregar_animes():
+    """Lê data/animes.json aceitando lista ou dicionário, e avisa de blocos inválidos."""
+    bruto = ler_json(DATA / "animes.json", [])
+    if isinstance(bruto, dict):
+        bruto = [dict(v, slug=v.get("slug", k)) for k, v in bruto.items() if isinstance(v, dict)]
+    if not isinstance(bruto, list):
+        print("ERRO: data/animes.json precisa ser uma lista de animes, entre colchetes [ ].")
+        sys.exit(1)
+    validos = []
+    for item in bruto:
+        if isinstance(item, dict) and item.get("slug"):
+            validos.append(item)
+        else:
+            print(f"AVISO: bloco ignorado em animes.json (falta 'slug' ou não é um objeto): {str(item)[:80]}")
+    return validos
+
+
 def main():
     if not CLIENT_ID:
         print("ERRO: MAL_CLIENT_ID não definido. Confira o Secret no GitHub e o campo env do workflow.")
@@ -492,7 +509,7 @@ def main():
     for s in temporadas:
         print(f"  temporada: {s['temporada']} {s['ano']}")
 
-    animes = ler_json(DATA / "animes.json", [])
+    animes = carregar_animes()
     estado = ler_json(DATA / "estado.json", {})
     pendentes = ler_json(DATA / "pendentes.json", [])
     avisos = ler_json(DATA / "avisos.json", [])
