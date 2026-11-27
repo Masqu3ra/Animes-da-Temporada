@@ -1,34 +1,4 @@
-[
-  {
-    "slug": "overgear",
-    "busca": "Overgear",
-    "anilist_id": null,
-    "analise": "",
-    "nota": null,
-    "fonte_oficial": ""
-  },
-  {
-    "slug": "dragon-ball-super",
-    "busca": "Dragon Ball Super",
-    "anilist_id": null,
-    "analise": "",
-    "nota": null,
-    "fonte_oficial": ""
-  },
-  {
-    "slug": "the-vermilion-mask",
-    "busca": "The Vermilion Mask",
-    "anilist_id": null,
-    "analise": "",
-    "nota": null,
-    "fonte_oficial": ""
-  },
-  {
-    "slug": "black-clover",
-    "busca": "Black Clover",
-    "anilist_id": null,
-    "analise": "",
-    "nota": null,
-    "fonte_oficial": ""
-  }
-]
+{
+  "temporada_atual": { "ano": 2026, "temporada": "fall" },
+  "anos_extras": [2027]
+}
