@@ -1,1 +1,42 @@
-{}
+{
+  "overgear": {
+    "slug": "overgear",
+    "nome": "Overgeared",
+    "hash": "78e85325d4da4b5bd423b7679397fb83fc5215fb1553d2906ef03a1bdb8f6d49",
+    "status": "currently_airing",
+    "ep": null,
+    "airingAt": null,
+    "proximo": "Data não confirmada",
+    "verificado": "27/11/2026 17:14"
+  },
+  "dragon-ball-super": {
+    "slug": "dragon-ball-super",
+    "nome": "Dragon Ball Super",
+    "hash": "0d4bc920038f030d4faf89c41cab95b820cdfb93c0f7adc3123fe1ad33eede79",
+    "status": "finished_airing",
+    "ep": null,
+    "airingAt": null,
+    "proximo": "Data não confirmada",
+    "verificado": "27/11/2026 17:14"
+  },
+  "the-vermilion-mask": {
+    "slug": "the-vermilion-mask",
+    "nome": "The Vermilion Mask",
+    "hash": "4858b461f0450d246aa8482149533fbec32b68e21707a9ba07e289ebb40b73f5",
+    "status": "not_yet_aired",
+    "ep": null,
+    "airingAt": null,
+    "proximo": "Data não confirmada",
+    "verificado": "27/11/2026 17:14"
+  },
+  "black-clover": {
+    "slug": "black-clover",
+    "nome": "Black Clover",
+    "hash": "e84d2fecd6db610d64506bd25be5861dea9628e7af2e9f1d8c8ff6083c981c4e",
+    "status": "finished_airing",
+    "ep": null,
+    "airingAt": null,
+    "proximo": "Data não confirmada",
+    "verificado": "27/11/2026 17:14"
+  }
+}
