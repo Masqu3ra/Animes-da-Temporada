@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-Atualiza o site de animes usando a API oficial do MyAnimeList (v2).
+Atualiza o site de animes da temporada usando a API oficial do MyAnimeList (v2).
 
 Uso: python scripts/update.py
+Requer MAL_CLIENT_ID (GitHub Secret, passado pelo workflow).
+Temporada em data/config.json, por exemplo {"ano": 2026, "temporada": "fall"}.
 
-Requer a variável de ambiente MAL_CLIENT_ID (GitHub Secret, passado pelo workflow).
-
-- Lê data/animes.json (animes acompanhados, IDs do MyAnimeList e textos editoriais).
-- Consulta a API para cada anime e gera a página só dos que mudaram.
-- Avisos de mudança de data:
-    * a data da próxima estreia vem de "proxima_estreia" no animes.json (preenchida a partir
-      do anúncio oficial). A API do MAL não informa a data do próximo episódio.
-    * se a data mudar para o mesmo episódio e o anime tiver "fonte_oficial",
-      o aviso vai para a capa do site.
-    * sem "fonte_oficial", a mudança vai para data/pendentes.json para revisão.
+- Lista todos os animes da temporada e gera uma página para cada um.
+- Os animes do canal (data/animes.json) recebem página completa, com análise.
+- Os demais recebem ficha automática, marcada para não aparecer no Google.
+- Horários do Japão e de Brasília são calculados a partir do horário semanal.
+- Mudanças de data só viram aviso quando há fonte oficial informada.
 """
 import hashlib
 import html
@@ -24,50 +21,81 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 DOCS = ROOT / "docs"  # o GitHub Pages publica a pasta docs/
-TZ = ZoneInfo("America/Sao_Paulo")
+TZ_BR = ZoneInfo("America/Sao_Paulo")
+TZ_JP = ZoneInfo("Asia/Tokyo")
 API = "https://api.myanimelist.net/v2"
-PAUSA = 1.0  # segundos entre requisições
+PAUSA = 1.0
 USER_AGENT = "animes-temporada/1.0 (site pessoal de analises)"
 CLIENT_ID = os.environ.get("MAL_CLIENT_ID", "").strip()
+DESTAQUE_NOTA = 7.0  # nota mínima para ir a "Em destaque"
+LIMITE_PAGINAS = 10  # trava de segurança na paginação da temporada
 
-# Campos pedidos à API. Ela não devolve todos por padrão.
 CAMPOS = ",".join([
-    "id",
-    "title",
-    "alternative_titles",
-    "synopsis",
-    "mean",
-    "num_episodes",
-    "status",
-    "genres",
-    "studios",
-    "broadcast",
-    "start_season",
-    "start_date",
+    "id", "title", "alternative_titles", "synopsis", "mean", "num_episodes",
+    "status", "media_type", "genres", "studios", "broadcast", "start_date", "end_date",
+    "rank", "popularity", "num_list_users",
 ])
 
-STATUS_MAL = {
-    "currently_airing": "Em exibição",
-    "finished_airing": "Finalizado",
-    "not_yet_aired": "Ainda não estreou",
+STATUS_LABEL = {
+    "currently_airing": ("Em exibição", "Airing"),
+    "finished_airing": ("Finalizado", "Finished"),
+    "not_yet_aired": ("Ainda não estreou", "Not yet aired"),
+}
+NOME_TEMPORADA = {
+    "winter": ("Inverno", "Winter"),
+    "spring": ("Primavera", "Spring"),
+    "summer": ("Verão", "Summer"),
+    "fall": ("Outono", "Fall"),
+}
+DIA_INDEX = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+             "friday": 4, "saturday": 5, "sunday": 6}
+DIAS_PT = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+           "sexta-feira", "sábado", "domingo"]
+DIAS_EN = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+ROTULOS = {
+    "estudio": ("Estúdio", "Studio"),
+    "generos": ("Gêneros", "Genres"),
+    "episodios": ("Episódios", "Episodes"),
+    "tipo": ("Tipo", "Type"),
+    "inicio": ("Início da exibição", "Start date"),
+    "fim": ("Fim da exibição", "End date"),
+    "jp": ("Horário no Japão", "Air time in Japan"),
+    "br": ("Horário no Brasil", "Air time in Brazil"),
+    "proxima": ("Próxima estreia", "Next episode"),
+    "nota": ("Nota no MyAnimeList", "MyAnimeList score"),
+    "sinopse": ("Sinopse", "Synopsis"),
+    "analise": ("Análise", "Review"),
+    "ficha": ("Ficha completa no MyAnimeList", "Full page on MyAnimeList"),
+    "avisos": ("Avisos", "Notices"),
+    "sem_avisos": ("Nenhum aviso no momento.", "No notices at the moment."),
+    "ultima": ("Última verificação", "Last check"),
+    "inicio_site": ("Início", "Home"),
+    "traducao": ("Tradução em português ainda não publicada.", "Portuguese translation not published yet."),
+    "automatica": ("Ficha automática. A análise ainda não foi publicada.",
+                   "Automatic listing. The review has not been published yet."),
+    "sem_horario": ("Horário não informado", "Schedule not announced"),
+    "semanal": ("Semanal", "Weekly"),
+    "ranking": ("Ranking", "Rank"),
+    "popularidade": ("Popularidade", "Popularity"),
+    "membros": ("Membros", "Members"),
 }
 
-DIAS = {
-    "monday": "segundas",
-    "tuesday": "terças",
-    "wednesday": "quartas",
-    "thursday": "quintas",
-    "friday": "sextas",
-    "saturday": "sábados",
-    "sunday": "domingos",
-}
+
+def bi(pt, en):
+    """Texto nas duas línguas. A página mostra uma por vez, conforme o botão."""
+    return f'<span class="pt">{html.escape(pt)}</span><span class="en">{html.escape(en)}</span>'
+
+
+def rotulo(chave):
+    pt, en = ROTULOS[chave]
+    return bi(pt, en)
 
 
 def ler_json(caminho, padrao):
@@ -84,14 +112,11 @@ def requisicao(caminho, params=None):
     url = API + caminho
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(
-        url,
-        headers={
-            "X-MAL-CLIENT-ID": CLIENT_ID,
-            "Accept": "application/json",
-            "User-Agent": USER_AGENT,
-        },
-    )
+    req = urllib.request.Request(url, headers={
+        "X-MAL-CLIENT-ID": CLIENT_ID,
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    })
     for _ in range(3):
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -101,7 +126,7 @@ def requisicao(caminho, params=None):
         except urllib.error.HTTPError as erro:
             if erro.code == 404:
                 return None
-            if erro.code == 403:  # limite de requisições atingido: espera e tenta de novo
+            if erro.code == 403:
                 print("  limite de requisições atingido, aguardando")
                 time.sleep(60)
                 continue
@@ -113,31 +138,76 @@ def requisicao(caminho, params=None):
     return None
 
 
-def formatar_exibicao(broadcast):
-    if not broadcast or not broadcast.get("day_of_the_week"):
-        return "Não informado"
-    dia = DIAS.get(broadcast["day_of_the_week"], broadcast["day_of_the_week"])
-    hora = broadcast.get("start_time")
-    if hora:
-        return f"{dia.capitalize()} às {hora} (horário do Japão)"
-    return dia.capitalize()
+def horario_semanal(broadcast):
+    """Converte o horário semanal (Japão) para os horários do Japão e de Brasília."""
+    if not broadcast or not broadcast.get("day_of_the_week") or not broadcast.get("start_time"):
+        return None
+    alvo = DIA_INDEX.get(broadcast["day_of_the_week"])
+    if alvo is None:
+        return None
+    hoje = datetime.now(TZ_JP).date()
+    data = hoje + timedelta(days=(alvo - hoje.weekday()) % 7)
+    hh, mm = (int(x) for x in broadcast["start_time"].split(":")[:2])
+    jp = datetime(data.year, data.month, data.day, hh, mm, tzinfo=TZ_JP)
+    br = jp.astimezone(TZ_BR)
+    return {
+        "jp_pt": f"{DIAS_PT[jp.weekday()]} às {jp:%H:%M}",
+        "jp_en": f"{DIAS_EN[jp.weekday()]} at {jp:%H:%M}",
+        "br_pt": f"{DIAS_PT[br.weekday()]} às {br:%H:%M}",
+        "br_en": f"{DIAS_EN[br.weekday()]} at {br:%H:%M}",
+    }
+
+
+def data_legivel(texto):
+    if not texto:
+        return "—"
+    partes = texto.split("-")
+    if len(partes) == 3:
+        return f"{partes[2]}/{partes[1]}/{partes[0]}"
+    if len(partes) == 2:
+        return f"{partes[1]}/{partes[0]}"
+    return partes[0]
 
 
 def normalizar(dados):
-    """Converte a resposta da API no formato que o site usa."""
-    alternativos = dados.get("alternative_titles") or {}
+    """Converte o registro da API no formato que o site usa."""
+    alt = dados.get("alternative_titles") or {}
     return {
         "id": dados["id"],
-        "titulo": alternativos.get("en") or dados.get("title") or "Sem título",
-        "sinopse": dados.get("synopsis") or "Sinopse indisponível.",
+        "titulo": alt.get("en") or dados.get("title") or "Sem título",
+        "sinopse_en": dados.get("synopsis") or "",
         "mal_nota": dados.get("mean"),
         "episodios": dados.get("num_episodes"),
         "status": dados.get("status"),
+        "tipo": (dados.get("media_type") or "").upper(),
         "estudios": [s["name"] for s in dados.get("studios", [])],
         "generos": [g["name"] for g in dados.get("genres", [])],
-        "exibicao": formatar_exibicao(dados.get("broadcast")),
+        "inicio": data_legivel(dados.get("start_date")),
+        "fim": data_legivel(dados.get("end_date")),
+        "horario": horario_semanal(dados.get("broadcast")),
+        "ranking": dados.get("rank"),
+        "popularidade": dados.get("popularity"),
+        "membros": dados.get("num_list_users"),
         "url": f"https://myanimelist.net/anime/{dados['id']}",
     }
+
+
+def listar_temporada(ano, temporada):
+    """Percorre todas as páginas da temporada, da mais bem avaliada para a menos."""
+    encontrados = []
+    offset = 0
+    for _ in range(LIMITE_PAGINAS):
+        resposta = requisicao(f"/anime/season/{ano}/{temporada}", {
+            "fields": CAMPOS, "limit": 100, "offset": offset, "sort": "anime_score",
+        })
+        if not resposta:
+            break
+        for item in resposta.get("data", []):
+            encontrados.append(item.get("node", item))
+        if not (resposta.get("paging") or {}).get("next"):
+            break
+        offset += 100
+    return encontrados
 
 
 def consultar(anime):
@@ -147,7 +217,7 @@ def consultar(anime):
         return normalizar(dados) if dados else None
     resposta = requisicao("/anime", {"q": anime["busca"], "limit": 5, "fields": "id,title,media_type"})
     for item in (resposta or {}).get("data", []):
-        no = item.get("node", item)  # a API pode envolver cada resultado em "node"
+        no = item.get("node", item)
         if no.get("media_type") == "tv":
             return consultar({"mal_id": no["id"]})
     return None
@@ -155,7 +225,7 @@ def consultar(anime):
 
 def proxima_estreia(anime):
     """Retorna (episódio, timestamp) da próxima estreia, ou None se não houver data conhecida."""
-    manual = anime.get("proxima_estreia") or {}
+    manual = (anime or {}).get("proxima_estreia") or {}
     if manual.get("data"):
         ts = datetime.fromisoformat(manual["data"]).timestamp()
         return manual.get("episodio"), ts
@@ -165,100 +235,186 @@ def proxima_estreia(anime):
 def formatar_data(ts):
     if not ts:
         return "sem data confirmada"
-    return datetime.fromtimestamp(ts, TZ).strftime("%d/%m/%Y às %H:%M")
+    return datetime.fromtimestamp(ts, TZ_BR).strftime("%d/%m/%Y às %H:%M")
 
 
 def assinatura(media, anime):
-    """Impressão digital dos dados: se mudar, a página é regenerada."""
     conteudo = {
         "media": media,
-        "editorial": {k: anime.get(k) for k in ("analise", "nota", "proxima_estreia")},
+        "editorial": {k: anime.get(k) for k in ("analise", "nota", "proxima_estreia", "sinopse_pt")},
     }
     bruto = json.dumps(conteudo, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(bruto.encode("utf-8")).hexdigest()
 
 
-def casca(titulo_pagina, corpo, base=""):
+CSS = """
+:root { --bg:#0f1115; --card:#181b22; --texto:#eceef3; --muted:#9aa3b2; --acento:#7c5cff; --verde:#2ecc71; --azul:#3498db; --cinza:#6b7385; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--texto); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; line-height:1.6; }
+a { color:var(--acento); }
+.topo { background: linear-gradient(135deg, #2b1d5c 0%, #0f1115 75%); padding:36px 20px; text-align:center; border-bottom:1px solid #22262f; }
+.topo h1 { margin:0; font-size:2rem; }
+.topo p { margin:6px 0 0; color:var(--muted); }
+.barra { max-width:1080px; margin:0 auto; padding:14px 20px 0; display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.barra a { font-weight:600; text-decoration:none; }
+.idioma { background:#252a35; color:var(--texto); border:1px solid #333a48; border-radius:8px; padding:6px 12px; cursor:pointer; font-weight:600; }
+.wrap { max-width:1080px; margin:0 auto; padding:0 20px 48px; }
+h1 { font-size:1.8rem; margin:24px 0 8px; }
+h2 { font-size:1.25rem; margin:32px 0 14px; border-left:4px solid var(--acento); padding-left:10px; }
+.avisos { background:#2a2310; border:1px solid #5a4a16; border-radius:10px; padding:10px 18px; }
+.avisos ul { margin:6px 0; padding-left:18px; }
+.grade { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:16px; }
+.card { background:var(--card); border-radius:12px; padding:18px; border-top:4px solid var(--cinza); text-decoration:none; color:inherit; transition:transform .15s; }
+.card:hover { transform:translateY(-3px); }
+.card.exibicao { border-top-color:var(--verde); }
+.card.finalizado { border-top-color:var(--azul); }
+.card h3 { margin:0 0 10px; font-size:1.05rem; }
+.selo { display:inline-block; font-size:.75rem; padding:2px 10px; border-radius:99px; background:#252a35; color:var(--muted); }
+.linha { color:var(--muted); font-size:.9rem; margin:8px 0 0; }
+.ficha { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:10px; background:var(--card); border-radius:12px; padding:16px 18px; list-style:none; margin:16px 0; }
+.ficha li { color:var(--muted); }
+.ficha strong { color:var(--texto); display:block; }
+.bloco { background:var(--card); border-radius:12px; padding:18px; }
+.rodape { color:var(--cinza); font-size:.85em; margin-top:32px; }
+.en { display:none; }
+body.en .en { display:revert; }
+body.en .pt { display:none; }
+"""
+
+
+def casca(titulo_pagina, corpo, base="", noindex=False):
+    robots = '<meta name="robots" content="noindex">' if noindex else ""
     return f"""<!doctype html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{robots}
 <title>{html.escape(titulo_pagina)}</title>
-<style>
-body {{ font-family: system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 16px; line-height: 1.5; color: #222; }}
-a {{ color: #0b5cad; }}
-.grade {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }}
-.card {{ border: 1px solid #ddd; border-radius: 8px; padding: 12px; text-decoration: none; color: inherit; }}
-.avisos {{ background: #fff8e1; border-left: 4px solid #f0a500; padding: 8px 16px; border-radius: 6px; }}
-.rodape {{ color: #777; font-size: 0.85em; }}
-</style>
+<style>{CSS}</style>
 </head>
 <body>
-<nav><a href="{base}index.html">Início</a></nav>
+<header class="topo">
+<h1>Animes da Temporada</h1>
+<p>{bi("Acompanhamento, fichas e análises", "Tracking, listings and reviews")}</p>
+</header>
+<div class="barra">
+<a href="{base}index.html">{rotulo("inicio_site")}</a>
+<button class="idioma" onclick="document.body.classList.toggle('en')">PT / EN</button>
+</div>
+<main class="wrap">
 {corpo}
+</main>
 </body>
 </html>
 """
 
 
 def pagina_anime(media, anime, agora):
+    curado = anime is not None
+    anime = anime or {}
     nome = media["titulo"]
+    estudios = ", ".join(media["estudios"]) or "—"
+    generos = ", ".join(media["generos"]) or "—"
     prox = proxima_estreia(anime)
     if prox:
         ep, ts = prox
         proximo = f"Episódio {ep}: {formatar_data(ts)}" if ep else formatar_data(ts)
     else:
-        proximo = "Data não confirmada"
-    analise = anime.get("analise")
-    if analise:
-        paragrafos = "".join(f"<p>{html.escape(p)}</p>" for p in analise.split("\n\n"))
+        proximo = "—"
+    st_pt, st_en = STATUS_LABEL.get(media["status"], ("—", "—"))
+    if media["horario"]:
+        h = media["horario"]
+        horario_jp = bi(h["jp_pt"], h["jp_en"])
+        horario_br = bi(h["br_pt"], h["br_en"])
     else:
-        paragrafos = "<p><em>Análise em breve.</em></p>"
-    nota = anime.get("nota")
-    bloco_nota = f"<p><strong>Sua nota:</strong> {nota}/10</p>" if nota is not None else ""
-    estudios = ", ".join(media["estudios"]) or "—"
-    generos = ", ".join(media["generos"]) or "—"
+        horario_jp = horario_br = bi("Não informado", "Not announced")
+    sinopse_pt = anime.get("sinopse_pt")
+    if sinopse_pt:
+        bloco_sinopse = f'<p class="pt">{html.escape(sinopse_pt)}</p>'
+        aviso_traducao = ""
+    else:
+        bloco_sinopse = f'<p class="pt">{html.escape(media["sinopse_en"] or "—")}</p>'
+        aviso_traducao = f'<p class="rodape">{rotulo("traducao")}</p>'
+    sinopse_en = f'<p class="en">{html.escape(media["sinopse_en"] or "—")}</p>'
+    if curado:
+        paragrafos = "".join(f"<p>{html.escape(p)}</p>" for p in (anime.get("analise") or "").split("\n\n") if p.strip())
+        if not paragrafos:
+            paragrafos = f"<p><em>{bi('Análise em breve.', 'Review coming soon.')}</em></p>"
+        nota = anime.get("nota")
+        bloco_nota = f"<p><strong>{bi('Sua nota', 'Your score')}:</strong> {nota}/10</p>" if nota is not None else ""
+        bloco_analise = f'<h2>{rotulo("analise")}</h2><div class="bloco">{bloco_nota}{paragrafos}</div>'
+    else:
+        bloco_analise = f'<p class="linha">{rotulo("automatica")}</p>'
     corpo = f"""<h1>{html.escape(nome)}</h1>
-<ul>
-<li><strong>Status:</strong> {html.escape(STATUS_MAL.get(media['status'], '—'))}</li>
-<li><strong>Estúdio:</strong> {html.escape(estudios)}</li>
-<li><strong>Gêneros:</strong> {html.escape(generos)}</li>
-<li><strong>Episódios:</strong> {html.escape(str(media['episodios'] or '—'))}</li>
-<li><strong>Horário de exibição:</strong> {html.escape(media['exibicao'])}</li>
-<li><strong>Próxima estreia:</strong> {html.escape(proximo)}</li>
-<li><strong>Nota no MyAnimeList:</strong> {html.escape(str(media['mal_nota'] or '—'))}</li>
+<p><span class="selo">{bi(st_pt, st_en)}</span></p>
+<ul class="ficha">
+<li>{rotulo("tipo")}{html.escape(media['tipo'] or '—')}</li>
+<li>{rotulo("estudio")}{html.escape(estudios)}</li>
+<li>{rotulo("generos")}{html.escape(generos)}</li>
+<li>{rotulo("episodios")}{html.escape(str(media['episodios'] or '—'))}</li>
+<li>{rotulo("inicio")}{html.escape(media['inicio'])}</li>
+<li>{rotulo("fim")}{html.escape(media['fim'])}</li>
+<li>{rotulo("jp")}{horario_jp}</li>
+<li>{rotulo("br")}{horario_br}</li>
+<li>{rotulo("proxima")}{html.escape(proximo)}</li>
+<li>{rotulo("nota")}{html.escape(str(media['mal_nota'] or '—'))}</li>
+<li>{rotulo("ranking")}#{html.escape(str(media['ranking'] or '—'))}</li>
+<li>{rotulo("popularidade")}#{html.escape(str(media['popularidade'] or '—'))}</li>
+<li>{rotulo("membros")}{html.escape(f"{media['membros']:,}".replace(",", ".") if media['membros'] else '—')}</li>
 </ul>
-<h2>Sinopse</h2>
-<p>{html.escape(media['sinopse'])}</p>
-<h2>Análise</h2>
-{bloco_nota}
-{paragrafos}
-<p><a href="{html.escape(media['url'])}">Ficha completa no MyAnimeList</a></p>
-<p class="rodape">Dados verificados em {html.escape(agora)}.</p>"""
-    return casca(nome, corpo, base="../")
+<h2>{rotulo("sinopse")}</h2>
+<div class="bloco">{bloco_sinopse}{sinopse_en}{aviso_traducao}</div>
+{bloco_analise}
+<p><a href="{html.escape(media['url'])}">{rotulo("ficha")}</a></p>
+<p class="rodape">{rotulo("ultima")}: {html.escape(agora)}</p>"""
+    return casca(nome, corpo, base="../", noindex=not curado)
 
 
-def pagina_inicial(cards, avisos, agora):
+def classe_status(status):
+    return {"currently_airing": "exibicao", "finished_airing": "finalizado"}.get(status, "")
+
+
+def cartao(c):
+    st_pt, st_en = STATUS_LABEL.get(c.get("status"), ("—", "—"))
+    if c.get("status") == "finished_airing":
+        periodo = bi(f"{c.get('inicio', '—')} a {c.get('fim', '—')}", f"{c.get('inicio', '—')} to {c.get('fim', '—')}")
+    elif c.get("horario"):
+        h = c["horario"]
+        periodo = bi(f"Brasil: {h['br_pt']}", f"Brazil: {h['br_en']}")
+    else:
+        periodo = rotulo("sem_horario")
+    return (
+        f'<a class="card {classe_status(c.get("status"))}" href="anime/{html.escape(c["slug"])}.html">'
+        f'<h3>{html.escape(c["nome"])}</h3>'
+        f'<span class="selo">{bi(st_pt, st_en)}</span>'
+        f'<p class="linha">{html.escape(c.get("tipo") or "")} · {html.escape(str(c.get("episodios") or "—"))} ep. · #{html.escape(str(c.get("ranking") or "—"))}</p>'
+        f'<p class="linha">{periodo}</p></a>'
+    )
+
+
+def pagina_inicial(grupos, avisos, agora, config):
     if avisos:
         itens_avisos = "".join(
             f"<li><strong>{html.escape(a['texto'])}</strong> "
-            f"<small>(registrado em {html.escape(a['data_registro'])})</small></li>"
+            f"<small>({html.escape(a['data_registro'])})</small></li>"
             for a in avisos
         )
     else:
-        itens_avisos = "<li>Nenhum aviso no momento.</li>"
-    itens = "".join(
-        f'<a class="card" href="anime/{html.escape(c["slug"])}.html">'
-        f'<h3>{html.escape(c["nome"])}</h3>'
-        f'<p>Status: {html.escape(STATUS_MAL.get(c.get("status"), "—"))}</p>'
-        f'<p>{html.escape(c["proximo"])}</p></a>'
-        for c in cards
-    )
-    corpo = f"""<section class="avisos"><h2>Avisos</h2><ul>{itens_avisos}</ul></section>
-<h2>Temporada</h2>
-<div class="grade">{itens}</div>
-<p class="rodape">Última verificação: {html.escape(agora)}</p>"""
+        itens_avisos = f"<li>{rotulo('sem_avisos')}</li>"
+    secoes = ""
+    for (pt, en), lista in grupos:
+        if not lista:
+            continue
+        cards = "".join(cartao(c) for c in lista)
+        secoes += f'<h2>{bi(pt, en)}</h2><div class="grade">{cards}</div>'
+    temp_pt, temp_en = NOME_TEMPORADA.get(config["temporada"], ("", ""))
+    titulo_temp = bi(f"Temporada de {temp_pt} {config['ano']}", f"{temp_en} {config['ano']} season")
+    corpo = f"""<h1>{titulo_temp}</h1>
+<h2>{rotulo("avisos")}</h2>
+<section class="avisos"><ul>{itens_avisos}</ul></section>
+{secoes}
+<p class="rodape">{rotulo("ultima")}: {html.escape(agora)}</p>"""
     return casca("Animes da temporada", corpo, base="")
 
 
@@ -267,82 +423,104 @@ def main():
         print("ERRO: MAL_CLIENT_ID não definido. Confira o Secret no GitHub e o campo env do workflow.")
         sys.exit(1)
 
-    print("Fonte: API oficial do MyAnimeList (v2)")
+    config = ler_json(DATA / "config.json", {"ano": 2026, "temporada": "fall"})
+    print(f"Fonte: API oficial do MyAnimeList (v2) | {config['temporada']} {config['ano']}")
     animes = ler_json(DATA / "animes.json", [])
     estado = ler_json(DATA / "estado.json", {})
     pendentes = ler_json(DATA / "pendentes.json", [])
     avisos = ler_json(DATA / "avisos.json", [])
-    agora = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
+    agora = datetime.now(TZ_BR).strftime("%d/%m/%Y %H:%M")
     (DOCS / "anime").mkdir(parents=True, exist_ok=True)
 
+    colecao = {}
+    for bruto in listar_temporada(config["ano"], config["temporada"]):
+        n = normalizar(bruto)
+        colecao[n["id"]] = n
+    print(f"  {len(colecao)} animes encontrados na temporada")
+
+    curados = {}
     for anime in animes:
-        slug = anime["slug"]
-        print(f"Verificando {slug}...")
+        print(f"Verificando {anime['slug']}...")
         media = consultar(anime)
         if media is None:
             print("  não encontrado ou erro; mantendo os dados anteriores")
             continue
+        colecao[media["id"]] = media
+        curados[media["id"]] = anime
 
+    atualizadas = 0
+    slugs_atuais = []
+    for mid, media in colecao.items():
+        anime = curados.get(mid)
+        slug = anime["slug"] if anime else f"mal-{mid}"
+        slugs_atuais.append(slug)
         antigo = estado.get(slug, {})
-        prox = proxima_estreia(anime)
-        ep_novo, at_novo = prox if prox else (None, None)
+        ep_novo, at_novo = proxima_estreia(anime) or (None, None)
 
-        # Mudança de data do MESMO episódio (aviso de atraso ou antecipação)
-        if (
-            ep_novo
-            and antigo.get("ep") == ep_novo
-            and antigo.get("airingAt")
-            and at_novo
-            and antigo["airingAt"] != at_novo
-        ):
+        if anime and ep_novo and antigo.get("ep") == ep_novo and antigo.get("airingAt") and at_novo and antigo["airingAt"] != at_novo:
             aviso = {
-                "anime": media["titulo"],
-                "episodio": ep_novo,
-                "de": formatar_data(antigo["airingAt"]),
-                "para": formatar_data(at_novo),
+                "anime": media["titulo"], "episodio": ep_novo,
+                "de": formatar_data(antigo["airingAt"]), "para": formatar_data(at_novo),
                 "data_registro": agora,
             }
             if anime.get("fonte_oficial"):
                 aviso["fonte"] = anime["fonte_oficial"]
-                aviso["texto"] = (
-                    f"A estreia do episódio {ep_novo} de {aviso['anime']} mudou de "
-                    f"{aviso['de']} para {aviso['para']}, segundo a fonte oficial."
-                )
+                aviso["texto"] = (f"A estreia do episódio {ep_novo} de {aviso['anime']} mudou de "
+                                  f"{aviso['de']} para {aviso['para']}, segundo a fonte oficial.")
                 avisos.insert(0, aviso)
                 print("  mudança de data publicada como aviso na capa")
             else:
                 pendentes.append(aviso)
                 print("  mudança de data enviada para revisão (sem fonte oficial)")
 
-        assin = assinatura(media, anime)
+        assin = assinatura(media, anime or {})
         pagina = DOCS / "anime" / f"{slug}.html"
         if antigo.get("hash") != assin or not pagina.exists():
             pagina.write_text(pagina_anime(media, anime, agora), encoding="utf-8")
-            print("  página atualizada")
-        else:
-            print("  sem alterações")
+            atualizadas += 1
 
         if at_novo:
-            resumo_prox = f"Episódio {ep_novo}: {formatar_data(at_novo)}" if ep_novo else formatar_data(at_novo)
+            resumo = f"Episódio {ep_novo}: {formatar_data(at_novo)}" if ep_novo else formatar_data(at_novo)
         else:
-            resumo_prox = "Data não confirmada"
+            resumo = None
         estado[slug] = {
             "slug": slug,
             "nome": media["titulo"],
+            "curado": anime is not None,
             "hash": assin,
             "status": media["status"],
+            "tipo": media["tipo"],
+            "episodios": media["episodios"],
+            "mal_nota": media["mal_nota"],
+            "ranking": media["ranking"],
+            "popularidade": media["popularidade"],
+            "membros": media["membros"],
+            "inicio": media["inicio"],
+            "fim": media["fim"],
+            "horario": media["horario"],
             "ep": ep_novo,
             "airingAt": at_novo,
-            "proximo": resumo_prox,
+            "proximo": resumo,
             "verificado": agora,
         }
+
+    print(f"  páginas atualizadas nesta execução: {atualizadas}")
+
+    cards = [estado[s] for s in slugs_atuais if s in estado]
+    canal = sorted([c for c in cards if c["curado"]], key=lambda c: c["mal_nota"] or 0, reverse=True)
+    outros = sorted([c for c in cards if not c["curado"]], key=lambda c: c["mal_nota"] or 0, reverse=True)
+    destaque = [c for c in outros if (c["mal_nota"] or 0) >= DESTAQUE_NOTA]
+    resto = [c for c in outros if (c["mal_nota"] or 0) < DESTAQUE_NOTA]
+    grupos = [
+        (("Acompanhando no canal", "Following on the channel"), canal),
+        (("Em destaque", "Highlights"), destaque),
+        (("Outros da temporada", "Rest of the season"), resto),
+    ]
 
     salvar_json(DATA / "estado.json", estado)
     salvar_json(DATA / "pendentes.json", pendentes)
     salvar_json(DATA / "avisos.json", avisos[:50])
-
-    cards = [estado[a["slug"]] for a in animes if a["slug"] in estado]
-    (DOCS / "index.html").write_text(pagina_inicial(cards, avisos[:10], agora), encoding="utf-8")
+    (DOCS / "index.html").write_text(pagina_inicial(grupos, avisos[:10], agora, config), encoding="utf-8")
     print(f"Concluído. Itens aguardando revisão: {len(pendentes)}")
 
 
