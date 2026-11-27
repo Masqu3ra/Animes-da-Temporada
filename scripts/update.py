@@ -371,11 +371,38 @@ def pagina_anime(media, anime, agora):
     return casca(nome, corpo, base="../", noindex=not curado)
 
 
+ORDEM_TEMPORADAS = ["winter", "spring", "summer", "fall"]
+
+
+def lista_temporadas(config):
+    """Temporada atual primeiro, depois todas as quatro de cada ano extra, sem repetir."""
+    lista = [dict(config["temporada_atual"])]
+    for ano in config.get("anos_extras", []):
+        for t in ORDEM_TEMPORADAS:
+            lista.append({"ano": ano, "temporada": t})
+    vistos, unicas = set(), []
+    for s in lista:
+        chave = (s["ano"], s["temporada"])
+        if chave not in vistos:
+            vistos.add(chave)
+            unicas.append(s)
+    return unicas
+
+
+def arquivo_temporada(s):
+    return f"{s['temporada']}-{s['ano']}"
+
+
+def nome_temporada(s):
+    pt, en = NOME_TEMPORADA.get(s["temporada"], ("", ""))
+    return bi(f"{pt} {s['ano']}", f"{en} {s['ano']}")
+
+
 def classe_status(status):
     return {"currently_airing": "exibicao", "finished_airing": "finalizado"}.get(status, "")
 
 
-def cartao(c):
+def cartao(c, prefixo=""):
     st_pt, st_en = STATUS_LABEL.get(c.get("status"), ("—", "—"))
     if c.get("status") == "finished_airing":
         periodo = bi(f"{c.get('inicio', '—')} a {c.get('fim', '—')}", f"{c.get('inicio', '—')} to {c.get('fim', '—')}")
@@ -384,16 +411,24 @@ def cartao(c):
         periodo = bi(f"Brasil: {h['br_pt']}", f"Brazil: {h['br_en']}")
     else:
         periodo = rotulo("sem_horario")
+    ranking = c.get("ranking")
     return (
-        f'<a class="card {classe_status(c.get("status"))}" href="anime/{html.escape(c["slug"])}.html">'
+        f'<a class="card {classe_status(c.get("status"))}" href="{prefixo}anime/{html.escape(c["slug"])}.html">'
         f'<h3>{html.escape(c["nome"])}</h3>'
         f'<span class="selo">{bi(st_pt, st_en)}</span>'
-        f'<p class="linha">{html.escape(c.get("tipo") or "")} · {html.escape(str(c.get("episodios") or "—"))} ep. · #{html.escape(str(c.get("ranking") or "—"))}</p>'
+        f'<p class="linha">{html.escape(c.get("tipo") or "")} · {html.escape(str(c.get("episodios") or "—"))} ep.'
+        f'{" · #" + str(ranking) if ranking else ""}</p>'
         f'<p class="linha">{periodo}</p></a>'
     )
 
 
-def pagina_inicial(grupos, avisos, agora, config):
+def secao_cards(titulo, lista, prefixo=""):
+    if not lista:
+        return ""
+    return f'<h2>{bi(*titulo)}</h2><div class="grade">' + "".join(cartao(c, prefixo) for c in lista) + "</div>"
+
+
+def pagina_inicial(grupos, avisos, agora, atual, temps_info):
     if avisos:
         itens_avisos = "".join(
             f"<li><strong>{html.escape(a['texto'])}</strong> "
@@ -402,15 +437,11 @@ def pagina_inicial(grupos, avisos, agora, config):
         )
     else:
         itens_avisos = f"<li>{rotulo('sem_avisos')}</li>"
-    secoes = ""
-    for (pt, en), lista in grupos:
-        if not lista:
-            continue
-        cards = "".join(cartao(c) for c in lista)
-        secoes += f'<h2>{bi(pt, en)}</h2><div class="grade">{cards}</div>'
-    temp_pt, temp_en = NOME_TEMPORADA.get(config["temporada"], ("", ""))
-    titulo_temp = bi(f"Temporada de {temp_pt} {config['ano']}", f"{temp_en} {config['ano']} season")
-    corpo = f"""<h1>{titulo_temp}</h1>
+    secoes = "".join(secao_cards(titulo, lista) for titulo, lista in grupos)
+    if not secoes:
+        secoes = f'<p class="linha">{bi("A lista desta temporada ainda não está disponível.", "The list for this season is not available yet.")}</p>'
+    corpo = f"""<h1>{nome_temporada(atual)}</h1>
+<p class="linha"><a href="temporadas/index.html">{bi("Ver todas as temporadas", "See all seasons")}</a></p>
 <h2>{rotulo("avisos")}</h2>
 <section class="avisos"><ul>{itens_avisos}</ul></section>
 {secoes}
@@ -418,25 +449,67 @@ def pagina_inicial(grupos, avisos, agora, config):
     return casca("Animes da temporada", corpo, base="")
 
 
+def pagina_temporada(s, cards, agora):
+    if cards:
+        conteudo = f'<div class="grade">' + "".join(cartao(c, "../") for c in cards) + "</div>"
+    else:
+        conteudo = f'<p class="linha">{bi("A lista desta temporada ainda não está disponível no MyAnimeList.", "The list for this season is not available on MyAnimeList yet.")}</p>'
+    aviso = f'<p class="linha">{bi("A lista pode mudar até o fim da temporada.", "The list may change until the end of the season.")}</p>'
+    corpo = f"""<h1>{nome_temporada(s)}</h1>
+{aviso}
+{conteudo}
+<p class="rodape">{rotulo("ultima")}: {html.escape(agora)}</p>"""
+    return casca(f"{s['temporada']} {s['ano']}", corpo, base="../")
+
+
+def pagina_indice_temporadas(indice, agora):
+    itens = "".join(
+        f'<li><a href="{arquivo_temporada(s)}.html">{nome_temporada(s)}</a> '
+        f'<span class="linha">({qtd} {bi("animes", "animes")})</span></li>'
+        for s, qtd in indice
+    )
+    corpo = f"""<h1>{bi("Todas as temporadas", "All seasons")}</h1>
+<ul class="ficha">{itens}</ul>
+<p class="rodape">{rotulo("ultima")}: {html.escape(agora)}</p>"""
+    return casca("Temporadas", corpo, base="../")
+
+
+def ordenar_por_nota(lista):
+    return sorted(lista, key=lambda c: c.get("mal_nota") or 0, reverse=True)
+
+
 def main():
     if not CLIENT_ID:
         print("ERRO: MAL_CLIENT_ID não definido. Confira o Secret no GitHub e o campo env do workflow.")
         sys.exit(1)
 
-    config = ler_json(DATA / "config.json", {"ano": 2026, "temporada": "fall"})
-    print(f"Fonte: API oficial do MyAnimeList (v2) | {config['temporada']} {config['ano']}")
+    config = ler_json(DATA / "config.json", {
+        "temporada_atual": {"ano": 2026, "temporada": "fall"},
+        "anos_extras": [2027],
+    })
+    temporadas = lista_temporadas(config)
+    print("Fonte: API oficial do MyAnimeList (v2)")
+    for s in temporadas:
+        print(f"  temporada: {s['temporada']} {s['ano']}")
+
     animes = ler_json(DATA / "animes.json", [])
     estado = ler_json(DATA / "estado.json", {})
     pendentes = ler_json(DATA / "pendentes.json", [])
     avisos = ler_json(DATA / "avisos.json", [])
     agora = datetime.now(TZ_BR).strftime("%d/%m/%Y %H:%M")
     (DOCS / "anime").mkdir(parents=True, exist_ok=True)
+    (DOCS / "temporadas").mkdir(parents=True, exist_ok=True)
 
-    colecao = {}
-    for bruto in listar_temporada(config["ano"], config["temporada"]):
-        n = normalizar(bruto)
-        colecao[n["id"]] = n
-    print(f"  {len(colecao)} animes encontrados na temporada")
+    colecao, membros = {}, {}
+    for s in temporadas:
+        brutos = listar_temporada(s["ano"], s["temporada"])
+        ids = []
+        for bruto in brutos:
+            n = normalizar(bruto)
+            colecao[n["id"]] = n
+            ids.append(n["id"])
+        membros[arquivo_temporada(s)] = ids
+        print(f"  {s['temporada']} {s['ano']}: {len(ids)} animes")
 
     curados = {}
     for anime in animes:
@@ -449,11 +522,11 @@ def main():
         curados[media["id"]] = anime
 
     atualizadas = 0
-    slugs_atuais = []
+    slug_por_id = {}
     for mid, media in colecao.items():
         anime = curados.get(mid)
         slug = anime["slug"] if anime else f"mal-{mid}"
-        slugs_atuais.append(slug)
+        slug_por_id[mid] = slug
         antigo = estado.get(slug, {})
         ep_novo, at_novo = proxima_estreia(anime) or (None, None)
 
@@ -479,48 +552,48 @@ def main():
             pagina.write_text(pagina_anime(media, anime, agora), encoding="utf-8")
             atualizadas += 1
 
+        resumo = None
         if at_novo:
             resumo = f"Episódio {ep_novo}: {formatar_data(at_novo)}" if ep_novo else formatar_data(at_novo)
-        else:
-            resumo = None
         estado[slug] = {
-            "slug": slug,
-            "nome": media["titulo"],
-            "curado": anime is not None,
-            "hash": assin,
-            "status": media["status"],
-            "tipo": media["tipo"],
-            "episodios": media["episodios"],
-            "mal_nota": media["mal_nota"],
-            "ranking": media["ranking"],
-            "popularidade": media["popularidade"],
-            "membros": media["membros"],
-            "inicio": media["inicio"],
-            "fim": media["fim"],
-            "horario": media["horario"],
-            "ep": ep_novo,
-            "airingAt": at_novo,
-            "proximo": resumo,
-            "verificado": agora,
+            "slug": slug, "nome": media["titulo"], "curado": anime is not None,
+            "hash": assin, "status": media["status"], "tipo": media["tipo"],
+            "episodios": media["episodios"], "mal_nota": media["mal_nota"],
+            "ranking": media["ranking"], "popularidade": media["popularidade"],
+            "membros": media["membros"], "inicio": media["inicio"], "fim": media["fim"],
+            "horario": media["horario"], "ep": ep_novo, "airingAt": at_novo,
+            "proximo": resumo, "verificado": agora,
         }
 
-    print(f"  páginas atualizadas nesta execução: {atualizadas}")
+    print(f"  páginas de anime atualizadas nesta execução: {atualizadas}")
 
-    cards = [estado[s] for s in slugs_atuais if s in estado]
-    canal = sorted([c for c in cards if c["curado"]], key=lambda c: c["mal_nota"] or 0, reverse=True)
-    outros = sorted([c for c in cards if not c["curado"]], key=lambda c: c["mal_nota"] or 0, reverse=True)
+    def cards_de(ids):
+        return [estado[slug_por_id[i]] for i in ids if i in slug_por_id and slug_por_id[i] in estado]
+
+    atual = temporadas[0]
+    cards_atual = cards_de(membros[arquivo_temporada(atual)])
+    canal = ordenar_por_nota([c for c in estado.values() if c["curado"] and c["slug"] in set(slug_por_id.values())])
+    outros = ordenar_por_nota([c for c in cards_atual if not c["curado"]])
     destaque = [c for c in outros if (c["mal_nota"] or 0) >= DESTAQUE_NOTA]
     resto = [c for c in outros if (c["mal_nota"] or 0) < DESTAQUE_NOTA]
     grupos = [
-        (("Acompanhando no canal", "Following on the channel"), canal),
-        (("Em destaque", "Highlights"), destaque),
-        (("Outros da temporada", "Rest of the season"), resto),
+        ((("Acompanhando no canal", "Following on the channel")), canal),
+        ((("Em destaque", "Highlights")), destaque),
+        ((("Outros da temporada", "Rest of the season")), resto),
     ]
+
+    indice = []
+    for s in temporadas:
+        cards = ordenar_por_nota(cards_de(membros[arquivo_temporada(s)]))
+        (DOCS / "temporadas" / f"{arquivo_temporada(s)}.html").write_text(
+            pagina_temporada(s, cards, agora), encoding="utf-8")
+        indice.append((s, len(cards)))
+    (DOCS / "temporadas" / "index.html").write_text(pagina_indice_temporadas(indice, agora), encoding="utf-8")
 
     salvar_json(DATA / "estado.json", estado)
     salvar_json(DATA / "pendentes.json", pendentes)
     salvar_json(DATA / "avisos.json", avisos[:50])
-    (DOCS / "index.html").write_text(pagina_inicial(grupos, avisos[:10], agora, config), encoding="utf-8")
+    (DOCS / "index.html").write_text(pagina_inicial(grupos, avisos[:10], agora, atual, indice), encoding="utf-8")
     print(f"Concluído. Itens aguardando revisão: {len(pendentes)}")
 
 
