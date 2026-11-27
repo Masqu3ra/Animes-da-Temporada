@@ -19,6 +19,8 @@ jobs:
           python-version: "3.11"
 
       - name: Rodar atualização
+        env:
+          MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
         run: python scripts/update.py
 
       - name: Salvar mudanças
