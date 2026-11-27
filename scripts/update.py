@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Atualiza o site de animes da temporada usando a API pública do Jikan (MyAnimeList).
+Atualiza o site de animes usando a API oficial do MyAnimeList (v2).
 
 Uso: python scripts/update.py
 
+Requer a variável de ambiente MAL_CLIENT_ID (GitHub Secret, passado pelo workflow).
+
 - Lê data/animes.json (animes acompanhados, IDs do MyAnimeList e textos editoriais).
-- Consulta o Jikan para cada anime (sem chave de API).
-- Regenera a página só dos animes cujos dados mudaram.
+- Consulta a API para cada anime e gera a página só dos que mudaram.
 - Avisos de mudança de data:
-    * a data da próxima estreia vem de "proxima_estreia" no animes.json (você preenche
-      a partir do anúncio oficial) ou de uma fonte automática, quando houver.
+    * a data da próxima estreia vem de "proxima_estreia" no animes.json (preenchida a partir
+      do anúncio oficial). A API do MAL não informa a data do próximo episódio.
     * se a data mudar para o mesmo episódio e o anime tiver "fonte_oficial",
       o aviso vai para a capa do site.
     * sem "fonte_oficial", a mudança vai para data/pendentes.json para revisão.
@@ -17,6 +18,8 @@ Uso: python scripts/update.py
 import hashlib
 import html
 import json
+import os
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -29,14 +32,41 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 DOCS = ROOT / "docs"  # o GitHub Pages publica a pasta docs/
 TZ = ZoneInfo("America/Sao_Paulo")
-API = "https://api.jikan.moe/v4"
-PAUSA = 1.5  # o Jikan aceita cerca de 3 requisições por segundo e 60 por minuto
-USER_AGENT = "animes-temporada/1.0 (site pessoal de análises)"
+API = "https://api.myanimelist.net/v2"
+PAUSA = 1.0  # segundos entre requisições
+USER_AGENT = "animes-temporada/1.0 (site pessoal de analises)"
+CLIENT_ID = os.environ.get("MAL_CLIENT_ID", "").strip()
 
-STATUS = {
-    "Currently Airing": "Em exibição",
-    "Finished Airing": "Finalizado",
-    "Not yet aired": "Ainda não estreou",
+# Campos pedidos à API. Ela não devolve todos por padrão.
+CAMPOS = ",".join([
+    "id",
+    "title",
+    "alternative_titles",
+    "synopsis",
+    "mean",
+    "num_episodes",
+    "status",
+    "genres",
+    "studios",
+    "broadcast",
+    "start_season",
+    "start_date",
+])
+
+STATUS_MAL = {
+    "currently_airing": "Em exibição",
+    "finished_airing": "Finalizado",
+    "not_yet_aired": "Ainda não estreou",
+}
+
+DIAS = {
+    "monday": "segundas",
+    "tuesday": "terças",
+    "wednesday": "quartas",
+    "thursday": "quintas",
+    "friday": "sextas",
+    "saturday": "sábados",
+    "sunday": "domingos",
 }
 
 
@@ -50,10 +80,17 @@ def salvar_json(caminho, dados):
     caminho.write_text(json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def requisicao(caminho):
+def requisicao(caminho, params=None):
+    url = API + caminho
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(
-        API + caminho,
-        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        url,
+        headers={
+            "X-MAL-CLIENT-ID": CLIENT_ID,
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
     )
     for _ in range(3):
         try:
@@ -62,10 +99,13 @@ def requisicao(caminho):
             time.sleep(PAUSA)
             return dados
         except urllib.error.HTTPError as erro:
-            if erro.code == 429:  # limite atingido: espera e tenta de novo
+            if erro.code == 404:
+                return None
+            if erro.code == 403:  # limite de requisições atingido: espera e tenta de novo
+                print("  limite de requisições atingido, aguardando")
                 time.sleep(60)
                 continue
-            print(f"  erro HTTP {erro.code}")
+            print(f"  erro HTTP {erro.code} em {caminho}")
             return None
         except (urllib.error.URLError, TimeoutError) as erro:
             print(f"  falha de rede: {erro}")
@@ -73,24 +113,48 @@ def requisicao(caminho):
     return None
 
 
+def formatar_exibicao(broadcast):
+    if not broadcast or not broadcast.get("day_of_the_week"):
+        return "Não informado"
+    dia = DIAS.get(broadcast["day_of_the_week"], broadcast["day_of_the_week"])
+    hora = broadcast.get("start_time")
+    if hora:
+        return f"{dia.capitalize()} às {hora} (horário do Japão)"
+    return dia.capitalize()
+
+
+def normalizar(dados):
+    """Converte a resposta da API no formato que o site usa."""
+    alternativos = dados.get("alternative_titles") or {}
+    return {
+        "id": dados["id"],
+        "titulo": alternativos.get("en") or dados.get("title") or "Sem título",
+        "sinopse": dados.get("synopsis") or "Sinopse indisponível.",
+        "mal_nota": dados.get("mean"),
+        "episodios": dados.get("num_episodes"),
+        "status": dados.get("status"),
+        "estudios": [s["name"] for s in dados.get("studios", [])],
+        "generos": [g["name"] for g in dados.get("genres", [])],
+        "exibicao": formatar_exibicao(dados.get("broadcast")),
+        "url": f"https://myanimelist.net/anime/{dados['id']}",
+    }
+
+
 def consultar(anime):
     """Usa o mal_id se existir; senão faz busca pelo nome e pega o primeiro resultado de TV."""
     if anime.get("mal_id"):
-        resposta = requisicao(f"/anime/{anime['mal_id']}")
-        return (resposta or {}).get("data")
-    busca = urllib.parse.quote(anime["busca"])
-    resposta = requisicao(f"/anime?q={busca}&type=tv&limit=1")
-    lista = (resposta or {}).get("data") or []
-    return lista[0] if lista else None
+        dados = requisicao(f"/anime/{anime['mal_id']}", {"fields": CAMPOS})
+        return normalizar(dados) if dados else None
+    resposta = requisicao("/anime", {"q": anime["busca"], "limit": 5, "fields": "id,title,media_type"})
+    for item in (resposta or {}).get("data", []):
+        no = item.get("node", item)  # a API pode envolver cada resultado em "node"
+        if no.get("media_type") == "tv":
+            return consultar({"mal_id": no["id"]})
+    return None
 
 
 def proxima_estreia(anime):
-    """Retorna (episódio, timestamp) da próxima estreia, ou None se não houver data conhecida.
-
-    Prioridade: data preenchida à mão em animes.json.
-    Ponto de extensão: quando houver uma fonte automática confiável de datas,
-    ela entra aqui, retornando a mesma tupla.
-    """
+    """Retorna (episódio, timestamp) da próxima estreia, ou None se não houver data conhecida."""
     manual = anime.get("proxima_estreia") or {}
     if manual.get("data"):
         ts = datetime.fromisoformat(manual["data"]).timestamp()
@@ -102,10 +166,6 @@ def formatar_data(ts):
     if not ts:
         return "sem data confirmada"
     return datetime.fromtimestamp(ts, TZ).strftime("%d/%m/%Y às %H:%M")
-
-
-def titulo(media):
-    return media.get("title_english") or media.get("title") or "Sem título"
 
 
 def assinatura(media, anime):
@@ -143,11 +203,7 @@ a {{ color: #0b5cad; }}
 
 
 def pagina_anime(media, anime, agora):
-    nome = titulo(media)
-    estudios = ", ".join(s["name"] for s in media.get("studios", [])) or "—"
-    generos = ", ".join(g["name"] for g in media.get("genres", [])) or "—"
-    sinopse = html.escape(media.get("synopsis") or "Sinopse indisponível.")
-    exibicao = html.escape((media.get("broadcast") or {}).get("string") or "Não informado")
+    nome = media["titulo"]
     prox = proxima_estreia(anime)
     if prox:
         ep, ts = prox
@@ -161,23 +217,24 @@ def pagina_anime(media, anime, agora):
         paragrafos = "<p><em>Análise em breve.</em></p>"
     nota = anime.get("nota")
     bloco_nota = f"<p><strong>Sua nota:</strong> {nota}/10</p>" if nota is not None else ""
-    url = html.escape(media.get("url") or "https://myanimelist.net")
+    estudios = ", ".join(media["estudios"]) or "—"
+    generos = ", ".join(media["generos"]) or "—"
     corpo = f"""<h1>{html.escape(nome)}</h1>
 <ul>
-<li><strong>Status:</strong> {html.escape(STATUS.get(media.get('status'), '—'))}</li>
+<li><strong>Status:</strong> {html.escape(STATUS_MAL.get(media['status'], '—'))}</li>
 <li><strong>Estúdio:</strong> {html.escape(estudios)}</li>
 <li><strong>Gêneros:</strong> {html.escape(generos)}</li>
-<li><strong>Episódios:</strong> {html.escape(str(media.get('episodes') or '—'))}</li>
-<li><strong>Horário de exibição (original):</strong> {exibicao}</li>
+<li><strong>Episódios:</strong> {html.escape(str(media['episodios'] or '—'))}</li>
+<li><strong>Horário de exibição:</strong> {html.escape(media['exibicao'])}</li>
 <li><strong>Próxima estreia:</strong> {html.escape(proximo)}</li>
-<li><strong>Nota no MyAnimeList:</strong> {html.escape(str(media.get('score') or '—'))}</li>
+<li><strong>Nota no MyAnimeList:</strong> {html.escape(str(media['mal_nota'] or '—'))}</li>
 </ul>
 <h2>Sinopse</h2>
-<p>{sinopse}</p>
+<p>{html.escape(media['sinopse'])}</p>
 <h2>Análise</h2>
 {bloco_nota}
 {paragrafos}
-<p><a href="{url}">Ficha completa no MyAnimeList</a></p>
+<p><a href="{html.escape(media['url'])}">Ficha completa no MyAnimeList</a></p>
 <p class="rodape">Dados verificados em {html.escape(agora)}.</p>"""
     return casca(nome, corpo, base="../")
 
@@ -194,7 +251,7 @@ def pagina_inicial(cards, avisos, agora):
     itens = "".join(
         f'<a class="card" href="anime/{html.escape(c["slug"])}.html">'
         f'<h3>{html.escape(c["nome"])}</h3>'
-        f'<p>Status: {html.escape(STATUS.get(c.get("status"), "—"))}</p>'
+        f'<p>Status: {html.escape(STATUS_MAL.get(c.get("status"), "—"))}</p>'
         f'<p>{html.escape(c["proximo"])}</p></a>'
         for c in cards
     )
@@ -206,7 +263,11 @@ def pagina_inicial(cards, avisos, agora):
 
 
 def main():
-    print("VERSÃO JIKAN - API:", API)
+    if not CLIENT_ID:
+        print("ERRO: MAL_CLIENT_ID não definido. Confira o Secret no GitHub e o campo env do workflow.")
+        sys.exit(1)
+
+    print("Fonte: API oficial do MyAnimeList (v2)")
     animes = ler_json(DATA / "animes.json", [])
     estado = ler_json(DATA / "estado.json", {})
     pendentes = ler_json(DATA / "pendentes.json", [])
@@ -235,7 +296,7 @@ def main():
             and antigo["airingAt"] != at_novo
         ):
             aviso = {
-                "anime": titulo(media),
+                "anime": media["titulo"],
                 "episodio": ep_novo,
                 "de": formatar_data(antigo["airingAt"]),
                 "para": formatar_data(at_novo),
@@ -267,9 +328,9 @@ def main():
             resumo_prox = "Data não confirmada"
         estado[slug] = {
             "slug": slug,
-            "nome": titulo(media),
+            "nome": media["titulo"],
             "hash": assin,
-            "status": media.get("status"),
+            "status": media["status"],
             "ep": ep_novo,
             "airingAt": at_novo,
             "proximo": resumo_prox,
