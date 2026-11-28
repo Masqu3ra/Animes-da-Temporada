@@ -277,8 +277,8 @@ h2 { font-size:1.25rem; margin:32px 0 14px; border-left:4px solid var(--acento);
 .bloco { background:var(--card); border-radius:12px; padding:18px; }
 .rodape { color:var(--cinza); font-size:.85em; margin-top:32px; }
 .en { display:none; }
-body.en .en { display:revert; }
-body.en .pt { display:none; }
+body.modo-en .en { display:revert; }
+body.modo-en .pt { display:none; }
 """
 
 
@@ -300,7 +300,7 @@ def casca(titulo_pagina, corpo, base="", noindex=False):
 </header>
 <div class="barra">
 <a href="{base}index.html">{rotulo("inicio_site")}</a>
-<button class="idioma" onclick="document.body.classList.toggle('en')">PT / EN</button>
+<button class="idioma" onclick="document.body.classList.toggle('modo-en')">PT / EN</button>
 </div>
 <main class="wrap">
 {corpo}
