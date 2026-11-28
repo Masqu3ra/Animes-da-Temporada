@@ -1,4 +1,10 @@
-{
-  "temporada_atual": { "ano": 2026, "temporada": "fall" },
-  "anos_extras": [2027]
-}
+[
+  {
+    "slug": "overgear",
+    "mal_id": 12345,
+    "analise": "",
+    "nota": null,
+    "sinopse_pt": "",
+    "fonte_oficial": ""
+  }
+]
