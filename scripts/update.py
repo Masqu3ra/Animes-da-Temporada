@@ -488,10 +488,10 @@ def carregar_animes():
         sys.exit(1)
     validos = []
     for item in bruto:
-        if isinstance(item, dict) and item.get("slug"):
+        if isinstance(item, dict) and item.get("slug") and (item.get("mal_id") or item.get("busca")):
             validos.append(item)
         else:
-            print(f"AVISO: bloco ignorado em animes.json (falta 'slug' ou não é um objeto): {str(item)[:80]}")
+            print(f"AVISO: bloco ignorado em animes.json (precisa de 'slug' e de 'mal_id' ou 'busca'): {str(item)[:80]}")
     return validos
 
 
@@ -589,10 +589,11 @@ def main():
 
     atual = temporadas[0]
     cards_atual = cards_de(membros[arquivo_temporada(atual)])
-    canal = ordenar_por_nota([c for c in estado.values() if c["curado"] and c["slug"] in set(slug_por_id.values())])
-    outros = ordenar_por_nota([c for c in cards_atual if not c["curado"]])
-    destaque = [c for c in outros if (c["mal_nota"] or 0) >= DESTAQUE_NOTA]
-    resto = [c for c in outros if (c["mal_nota"] or 0) < DESTAQUE_NOTA]
+    slugs_atuais_set = set(slug_por_id.values())
+    canal = ordenar_por_nota([c for c in estado.values() if c.get("curado") and c.get("slug") in slugs_atuais_set])
+    outros = ordenar_por_nota([c for c in cards_atual if not c.get("curado")])
+    destaque = [c for c in outros if (c.get("mal_nota") or 0) >= DESTAQUE_NOTA]
+    resto = [c for c in outros if (c.get("mal_nota") or 0) < DESTAQUE_NOTA]
     grupos = [
         ((("Acompanhando no canal", "Following on the channel")), canal),
         ((("Em destaque", "Highlights")), destaque),
